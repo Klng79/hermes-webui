@@ -17,7 +17,7 @@ from api.config import (
     SESSIONS, SESSIONS_MAX, LOCK, STREAMS, STREAMS_LOCK, CANCEL_FLAGS,
     SERVER_START_TIME, CLI_TOOLSETS, _INDEX_HTML_PATH, get_available_models,
     IMAGE_EXTS, MD_EXTS, MIME_MAP, MAX_FILE_BYTES, MAX_UPLOAD_BYTES,
-    CHAT_LOCK, load_settings, save_settings, cfg,
+    CHAT_LOCK, load_settings, save_settings,
 )
 from api.helpers import require, bad, safe_resolve, j, t, read_body
 from api.models import (
@@ -679,28 +679,12 @@ def _handle_chat_start(handler, body):
     model = body.get('model') or s.model
     s.workspace = workspace; s.model = model; s.save()
     set_last_workspace(workspace)
-    
-    # Read base_url from config.yaml for this model
-    # cfg is a global variable loaded at module load time
-    model_cfg = cfg.get('model', {})
-    base_url = model_cfg.get('base_url', '')
-    
-    # Use resolve_model_provider to get the correct model, provider, and base_url
-    # This handles all providers including local Ollama/LM Studio endpoints
-    from api.config import resolve_model_provider
-    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
-    
     stream_id = uuid.uuid4().hex
     q = queue.Queue()
     with STREAMS_LOCK: STREAMS[stream_id] = q
-    kwargs = {}
-    # Pass resolved provider and base_url to the streaming handler
-    kwargs['provider'] = resolved_provider
-    kwargs['base_url'] = resolved_base_url
     thr = threading.Thread(
         target=_run_agent_streaming,
-        args=(s.session_id, msg, resolved_model, workspace, stream_id, attachments),
-        kwargs=kwargs,
+        args=(s.session_id, msg, model, workspace, stream_id, attachments),
         daemon=True,
     )
     thr.start()
