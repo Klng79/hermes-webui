@@ -170,6 +170,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 persist_user_message=msg_text,
             )
             s.messages = result.get('messages') or s.messages
+            # Stamp 'timestamp' on any messages that don't have one yet
+            _now = time.time()
+            for _m in s.messages:
+                if isinstance(_m, dict) and not _m.get('timestamp') and not _m.get('_ts'):
+                    _m['timestamp'] = int(_now)
             s.title = title_from(s.messages, s.title)
             # Read token/cost usage from the agent object (if available)
             input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0

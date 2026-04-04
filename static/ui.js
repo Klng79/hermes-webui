@@ -488,8 +488,8 @@ function renderMessages(){
       else inner.appendChild(frag);
     }
   }
-  // Render usage badge on the last assistant message row (if usage data exists)
-  if(S.session&&(S.session.input_tokens||S.session.output_tokens)){
+  // Render usage badge on the last assistant message row (if enabled and usage data exists)
+  if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
     const rows=inner.querySelectorAll('.msg-row');
     let lastAssist=null;
     for(let i=rows.length-1;i>=0;i--){if(rows[i].dataset.role==='assistant'){lastAssist=rows[i];break;}}

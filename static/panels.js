@@ -958,6 +958,8 @@ async function loadSettingsPanel(){
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel) sendKeySel.value=settings.send_key||'enter';
+    const showUsageCb=$('settingsShowTokenUsage');
+    if(showUsageCb) showUsageCb.checked=!!settings.show_token_usage;
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField) pwField.value='';
@@ -979,16 +981,19 @@ async function saveSettings(){
   const model=($('settingsModel')||{}).value;
   const workspace=($('settingsWorkspace')||{}).value;
   const sendKey=($('settingsSendKey')||{}).value;
+  const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const pw=($('settingsPassword')||{}).value;
   const body={};
   if(model) body.default_model=model;
   if(workspace) body.default_workspace=workspace;
   if(sendKey) body.send_key=sendKey;
+  body.show_token_usage=showTokenUsage;
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
       await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
       window._sendKey=sendKey||'enter';
+      window._showTokenUsage=showTokenUsage;
       showToast('Settings saved (password set — login now required)');
       toggleSettings();
       return;
@@ -997,6 +1002,8 @@ async function saveSettings(){
   try{
     await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
     window._sendKey=sendKey||'enter';
+    window._showTokenUsage=showTokenUsage;
+    renderMessages();
     showToast('Settings saved');
     toggleSettings();
   }catch(e){

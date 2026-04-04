@@ -8,6 +8,7 @@ const COMMANDS=[
   {name:'model',     desc:'Switch model (e.g. /model gpt-4o)',  fn:cmdModel,     arg:'model_name'},
   {name:'workspace', desc:'Switch workspace by name',            fn:cmdWorkspace, arg:'name'},
   {name:'new',       desc:'Start a new chat session',            fn:cmdNew},
+  {name:'usage',     desc:'Toggle token usage display on/off',   fn:cmdUsage},
 ];
 
 function parseCommand(text){
@@ -96,6 +97,19 @@ async function cmdNew(){
   await renderSessionList();
   $('msg').focus();
   showToast('New session created');
+}
+
+async function cmdUsage(){
+  const next=!window._showTokenUsage;
+  window._showTokenUsage=next;
+  try{
+    await api('/api/settings',{method:'POST',body:JSON.stringify({show_token_usage:next})});
+  }catch(e){}
+  // Update the settings checkbox if the panel is open
+  const cb=$('settingsShowTokenUsage');
+  if(cb) cb.checked=next;
+  renderMessages();
+  showToast('Token usage '+(next?'on':'off'));
 }
 
 // ── Autocomplete dropdown ───────────────────────────────────────────────────

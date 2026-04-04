@@ -632,6 +632,7 @@ _SETTINGS_DEFAULTS = {
     'default_model': DEFAULT_MODEL,
     'default_workspace': str(DEFAULT_WORKSPACE),
     'send_key': 'enter',  # 'enter' or 'ctrl+enter'
+    'show_token_usage': False,  # show input/output token badge below assistant messages
     'password_hash': None,  # SHA-256 hash; None = auth disabled
 }
 
@@ -651,6 +652,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {'password_hash'}
 _SETTINGS_ENUM_VALUES = {
     'send_key': {'enter', 'ctrl+enter'},
 }
+_SETTINGS_BOOL_KEYS = {'show_token_usage'}
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
@@ -669,6 +671,9 @@ def save_settings(settings: dict) -> dict:
             # Validate enum-constrained keys
             if k in _SETTINGS_ENUM_VALUES and v not in _SETTINGS_ENUM_VALUES[k]:
                 continue
+            # Coerce bool keys
+            if k in _SETTINGS_BOOL_KEYS:
+                v = bool(v)
             current[k] = v
     SETTINGS_FILE.write_text(
         json.dumps(current, ensure_ascii=False, indent=2),
