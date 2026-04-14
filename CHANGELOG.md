@@ -32,7 +32,7 @@ users enter any string (e.g. `openai/gpt-5.4`, `deepseek/deepseek-r2`, or any
 provider-prefixed ID) and press Enter or click + to use it immediately.
 i18n keys added to en, es, zh.
 
-- Total tests: TBD (was 1117)
+- Total tests: 1130 (was 1117)
 
 ## [v0.50.41] feat(ui): render MEDIA: images inline in web UI chat (fixes #450)
 

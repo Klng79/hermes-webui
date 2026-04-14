@@ -17,6 +17,19 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
 
 
+# ── Shared helpers for sprint-42 additional tests ────────────────────────────
+
+REPO = REPO_ROOT  # alias used by #427 tests
+_SESSIONS_JS = REPO_ROOT / 'static' / 'sessions.js'
+_STREAMING_PY = REPO_ROOT / 'api' / 'streaming.py'
+_MESSAGES_JS = REPO_ROOT / 'static' / 'messages.js'
+_UI_JS = REPO_ROOT / 'static' / 'ui.js'
+
+def _read_sessions_js():
+    return _SESSIONS_JS.read_text(encoding='utf-8')
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 class TestSessionDBInjection(unittest.TestCase):
     """Verify SessionDB is initialized and passed to AIAgent in streaming.py."""
 
