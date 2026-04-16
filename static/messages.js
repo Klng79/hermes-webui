@@ -138,6 +138,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   let assistantText='';
   let reasoningText='';
+  let liveReasoningText='';
   let assistantRow=null;
   let assistantBody=null;
   // Thinking tag patterns for streaming display
@@ -182,11 +183,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
     persistInflightState();
   }
-  function ensureAssistantRow(){
+  function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
     if(assistantRow&&!assistantRow.isConnected){assistantRow=null;assistantBody=null;}
+    if(!force&&!assistantRow){
+      const parsed=_parseStreamState();
+      if(!String((parsed&&parsed.displayText)||'').trim()) return;
+    }
+    let turn=$('liveAssistantTurn');
+    if(!turn){
+      appendThinking();
+      turn=$('liveAssistantTurn');
+    }
+    const blocks=(typeof _assistantTurnBlocks==='function')?_assistantTurnBlocks(turn):null;
+    if(!blocks) return;
     if(!assistantRow){
-      const existing=$('msgInner').querySelector('.msg-row[data-live-assistant="1"]');
+      const existing=blocks.querySelector('[data-live-assistant="1"]');
       if(existing){
         assistantRow=existing;
         assistantBody=existing.querySelector('.msg-body');
@@ -197,18 +209,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
 
-    removeThinking();
     const tr=$('toolRunningRow');if(tr)tr.remove();
     $('emptyState').style.display='none';
-    assistantRow=document.createElement('div');assistantRow.className='msg-row';
+    assistantRow=document.createElement('div');
+    assistantRow.className='assistant-segment';
+    assistantRow.setAttribute('data-live-assistant','1');
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
-    const role=document.createElement('div');role.className='msg-role assistant';
-    const _bn=window._botName||'Hermes';
-    const icon=document.createElement('div');icon.className='role-icon assistant';icon.textContent=_bn.charAt(0).toUpperCase();
-    const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent=_bn;
-    role.appendChild(icon);role.appendChild(lbl);
-    assistantRow.appendChild(role);assistantRow.appendChild(assistantBody);
-    $('msgInner').appendChild(assistantRow);
+    assistantRow.appendChild(assistantBody);
+    blocks.appendChild(assistantRow);
   }
 
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
@@ -244,7 +252,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _parseStreamState(){
     const raw=assistantText;
     if(reasoningText){
-      return {thinkingText:reasoningText, displayText:_streamDisplay(), inThinking:false};
+      return {thinkingText:liveReasoningText, displayText:_streamDisplay(), inThinking:false};
     }
     for(const {open,close} of _thinkPairs){
       const trimmed=raw.trimStart();
@@ -299,14 +307,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       assistantText+=d.text;
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
-
-      ensureAssistantRow();
+      const parsed=_parseStreamState();
+      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
       _scheduleRender();
     });
 
     source.addEventListener('reasoning',e=>{
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
+      liveReasoningText += d.text || '';
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       _scheduleRender();
@@ -327,7 +336,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
-      removeThinking();
+      // NOTE: don't removeThinking() here — keep the thinking card visible
+      // above the tool card so the turn reads top-to-bottom as:
+      // user → thinking → tool cards → response. Removing it caused the card
+      // to be re-created below everything when reasoning resumed post-tool.
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+      liveReasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       scrollIfPinned();
@@ -577,7 +591,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
         clearLiveToolCards();if(!assistantText)removeThinking();
-        S.session=session;S.messages=session.messages||[];
+        S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
+        const hasMessageToolMetadata=S.messages.some(m=>{
+          if(!m||m.role!=='assistant') return false;
+          const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+          const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+          return hasTc||hasTu;
+        });
+        if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
+          S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
+        }else{
+          S.toolCalls=[];
+        }
         syncTopbar();renderMessages();
       }
       renderSessionList();setBusy(false);setComposerStatus('');
@@ -736,12 +761,9 @@ function showApprovalCard(pending, pendingCount) {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
-  if (!sameApproval) card.scrollIntoView({block:"nearest", behavior:"smooth"});
-  // Apply current locale to data-i18n elements inside the card
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  // Focus Allow once button so Enter works immediately
   const onceBtn = $("approvalBtnOnce");
-  if (onceBtn) setTimeout(() => onceBtn.focus(), 50);
+  if (onceBtn) setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
 }
 
 async function respondApproval(choice) {
@@ -970,14 +992,9 @@ function showClarifyCard(pending) {
     lockComposerForClarify(question ? `Clarification needed: ${question}` : "Clarification needed");
   }
   _clarifySetControlsDisabled(false, false);
-  const msgInner = $("msgInner");
-  if (msgInner && card.parentElement !== msgInner) {
-    msgInner.appendChild(card);
-  }
   card.classList.add("visible");
-  if (!sameClarify) card.scrollIntoView({block:"nearest", behavior:"smooth"});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  if (input && !sameClarify) setTimeout(() => input.focus(), 50);
+  if (input && !sameClarify) setTimeout(() => input.focus({preventScroll: true}), 50);
 }
 
 async function respondClarify(response) {
