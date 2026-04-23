@@ -1260,7 +1260,8 @@ let _editingNoteId = null;  // null = new note, string = existing id
 async function loadMemory(force) {
   const panel = $('memoryPanel');
   _selectedNotes.clear();
-  _editingNoteId = null;
+  // Note: _editingNoteId is intentionally NOT reset here — callers that need
+  // a clean state (panel switch, cron refresh) should call cancelNoteEdit first.
   try {
     const data = await api('/api/memory');
     renderMemoryList(data.notes || []);
@@ -1289,7 +1290,7 @@ function renderMemoryList(notes) {
       html += `
       <div class="memory-note-row ${isEditing ? 'editing' : ''}" data-id="${esc(note.id)}">
         <div class="memory-note-header" onclick="toggleNoteRow('${esc(note.id)}')">
-          <input type="checkbox" class="mem-check" data-id="${esc(note.id)}" onclick="event.stopPropagation();toggleNoteSelect('${esc(note.id)}')" ${checked}>
+          <input type="checkbox" class="mem-check" data-id="${esc(note.id)}" ${checked}>
           <span class="mem-title">${esc(note.title || 'Untitled')}</span>
           <span class="mem-time">${esc(relativeTime(note.updated_at))}</span>
           <span class="mem-toggle">${isEditing ? li('chevron-up',14) : li('chevron-down',14)}</span>

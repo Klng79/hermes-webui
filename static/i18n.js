@@ -161,6 +161,7 @@ const LOCALES = {
     create: 'Create',
     remove: 'Remove',
     save_title: 'Save changes',
+    cancel_title: 'Cancel',
     edit_title: 'Edit this file',
     saved: 'Saved',
     save_failed: 'Save failed: ',
