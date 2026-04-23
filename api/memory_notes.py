@@ -47,9 +47,29 @@ def _write_note(path, title, content, existing_id=None):
     path.write_text(fm_text, encoding="utf-8")
     return note_id
 
+def _migrate_legacy_memory():
+    """If notes dir is empty but legacy MEMORY.md exists, import it as a note."""
+    notes_dir = _get_notes_dir()
+    # Check if already migrated
+    if list(notes_dir.glob("*.md")):
+        return
+    # Get the memories/ parent dir
+    memories_dir = notes_dir.parent
+    legacy_files = {
+        "My Notes": memories_dir / "MEMORY.md",
+        "User Profile": memories_dir / "USER.md",
+    }
+    for title, path in legacy_files.items():
+        if path.exists() and path.stat().st_size > 0:
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+            if content:
+                create_note(title, content)
+
 def list_notes():
     """Returns list of note summaries (id, title, preview, created_at, updated_at)."""
     notes_dir = _get_notes_dir()
+    # Auto-migrate legacy memory files if notes dir is empty
+    _migrate_legacy_memory()
     results = []
     for path in sorted(notes_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
