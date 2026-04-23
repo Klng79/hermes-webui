@@ -51,6 +51,8 @@ from api.config import (
     get_reasoning_status,
     set_reasoning_display,
     set_reasoning_effort,
+    get_httpd,
+    REPO_ROOT,
 )
 from api.helpers import (
     require,
@@ -63,6 +65,13 @@ from api.helpers import (
     _sanitize_error,
     redact_session_data,
     _redact_text,
+)
+from api.memory_notes import (
+    list_notes,
+    get_note,
+    create_note,
+    update_note,
+    delete_notes,
 )
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
@@ -860,6 +869,177 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/crons/recent":
         return _handle_cron_recent(handler, parsed)
 
+    # ── Orch Tasks API (GET) ──
+    if parsed.path == "/api/orch-tasks":
+        from pathlib import Path as _Path
+        tasks_dir = _Path.home() / "hermes-orchestrate" / "tasks"
+        tasks = []
+        if tasks_dir.exists():
+            for entry in sorted(tasks_dir.iterdir()):
+                if entry.is_dir() and not entry.name.startswith('.'):
+                    state_file = entry / "state.json"
+                    if state_file.exists():
+                        try:
+                            import json as _json
+                            state = _json.loads(state_file.read_text(encoding="utf-8"))
+                            tasks.append({
+                                "id": entry.name,
+                                "task_id": state.get("task_id", entry.name),
+                                "title": state.get("title", state.get("task_id", entry.name)),
+                                "status": state.get("status", "unknown"),
+                                "domain": state.get("domain", ""),
+                                "depends_on": state.get("depends_on"),
+                                "created": state.get("created"),
+                                "updated": state.get("updated"),
+                                "worker_id": state.get("worker_id"),
+                                "profile": state.get("profile"),
+                                "budget_limit": state.get("budget_limit"),
+                                "budget_used": state.get("budget_used"),
+                            })
+                        except Exception:
+                            pass
+        return j(handler, {"tasks": tasks})
+
+    # ── Orch Tasks API (POST / spawn) ──
+    if parsed.path == "/api/orch-tasks/spawn":
+        import json as _json
+        from urllib.parse import parse_qs as _parse_qs
+        qs = _parse_qs(parsed.query)
+        body = parsed.body or b"{}"
+        try:
+            data = _json.loads(body.decode("utf-8"))
+        except Exception:
+            data = {}
+        task_id = qs.get("task_id", [data.get("task_id", "")])[0]
+        domain = qs.get("domain", [data.get("domain", "coding")])[0]
+        if not task_id:
+            return j(handler, {"error": "task_id required"}, status=400)
+        import subprocess as _subprocess
+        scripts_dir = str(_Path.home() / "hermes-orchestrate" / "scripts")
+        # Spawn worker via spawn-worker.sh (detached)
+        result = _subprocess.run(
+            ["/bin/bash", f"{scripts_dir}/spawn-worker.sh", task_id, domain],
+            capture_output=True, text=True, timeout=10,
+        )
+        return j(handler, {"spawned": task_id, "domain": domain})
+
+    # ── Orch Heartbeat API (POST) ──
+    # ── Orch Jobs API (GET) ──
+    if parsed.path == "/api/orch-jobs":
+        import subprocess as _subprocess
+        domains = ["coding", "research", "writing", "review"]
+        jobs = []
+        try:
+            result = _subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            sessions = result.stdout.strip().split("\n") if result.stdout else []
+        except Exception:
+            sessions = []
+        for domain in domains:
+            session_name = "heartbeat-" + domain
+            running = session_name in sessions
+            jobs.append({"domain": domain, "sessionName": session_name, "running": running, "status": "running" if running else "stopped"})
+        return j(handler, {"jobs": jobs})
+
+    # ── Orch Dashboard API (GET) ──
+    if parsed.path == "/api/orch-dash":
+        try:
+            import json as _json
+            import subprocess as _subprocess
+            from pathlib import Path as _Path
+            tasks_dir = _Path.home() / "hermes-orchestrate" / "tasks"
+            audit_file = _Path.home() / "hermes-orchestrate" / "audit.jsonl"
+            tasks = {"total": 0, "pending": 0, "running": 0, "done": 0, "failed": 0, "blocked": 0}
+            if tasks_dir.exists():
+                for entry in sorted(tasks_dir.iterdir()):
+                    if entry.is_dir() and not entry.name.startswith("."):
+                        state_file = entry / "state.json"
+                        if state_file.exists():
+                            try:
+                                state = _json.loads(state_file.read_text(encoding="utf-8"))
+                                s = state.get("status", "unknown")
+                                if s in tasks:
+                                    tasks[s] += 1
+                                tasks["total"] += 1
+                            except Exception:
+                                pass
+            try:
+                result = _subprocess.run(
+                    ["tmux", "list-sessions", "-F", "#{session_name}"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                sessions = result.stdout.strip().split("\n") if result.stdout else []
+                active_workers = sum(1 for s in sessions if s.startswith("worker-"))
+            except Exception:
+                active_workers = 0
+            total_cost = 0.0
+            if audit_file.exists():
+                try:
+                    for line in audit_file.read_text(encoding="utf-8").strip().split("\n"):
+                        if not line:
+                            continue
+                        try:
+                            entry = _json.loads(line)
+                            if entry.get("action") == "cost":
+                                import re as _re
+                                m = _re.search(r"cost:([0-9.]+)", str(entry.get("details", "")))
+                                if m:
+                                    total_cost += float(m.group(1))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            return j(handler, {"tasks": tasks, "activeWorkers": active_workers, "totalCost": round(total_cost, 4)})
+        except Exception as _e:
+            import traceback
+            tb = traceback.format_exc()
+            handler.send_response(500)
+            handler.send_header("Content-Type", "text/plain")
+            handler.end_headers()
+            handler.wfile.write(("Dashboard error: %s\n%s" % (_e, tb)).encode())
+            return
+
+    # ── Orch Pending Approvals API (GET) ──
+    if parsed.path == "/api/orch-approvals":
+        import json as _json
+        from pathlib import Path as _Path
+        pending_dir = _Path.home() / "hermes-orchestrate" / "pending-approvals"
+        approvals = []
+        if pending_dir.exists():
+            for f in pending_dir.iterdir():
+                if f.suffix == ".json":
+                    try:
+                        entry = _json.loads(f.read_text(encoding="utf-8"))
+                        if entry.get("status") == "pending":
+                            approvals.append({"filename": f.name, **entry})
+                    except Exception:
+                        pass
+        return j(handler, {"approvals": approvals})
+
+    # ── Orch Approve API (POST) ──
+    if parsed.path == "/api/orch-approve":
+        import json as _json
+        from urllib.parse import parse_qs as _parse_qs
+        from pathlib import Path as _Path
+        qs = _parse_qs(parsed.query)
+        body = parsed.body or b"{}"
+        try:
+            data = _json.loads(body.decode("utf-8"))
+        except Exception:
+            data = {}
+        filename = qs.get("filename", [data.get("filename", "")])[0]
+        if not filename:
+            return j(handler, {"error": "filename required"}, status=400)
+        import subprocess as _subprocess
+        scripts_dir = str(_Path.home() / "hermes-orchestrate" / "scripts")
+        _subprocess.run(
+            ["/bin/bash", f"{scripts_dir}/approve.sh", str(_Path.home() / "hermes-orchestrate" / "pending-approvals" / filename)],
+            capture_output=True, timeout=10,
+        )
+        return j(handler, {"approved": filename})
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         from tools.skills_tool import skills_list as _skills_list
@@ -906,9 +1086,13 @@ def handle_get(handler, parsed) -> bool:
             data["linked_files"] = {}
         return j(handler, data)
 
-    # ── Memory API (GET) ──
+    # ── Memory Notes API (GET) ──
     if parsed.path == "/api/memory":
-        return _handle_memory_read(handler)
+        # /api/memory/{id} vs /api/memory
+        if parsed.path.startswith("/api/memory/"):
+            note_id = parsed.path[len("/api/memory/"):]
+            return _handle_memory_get(handler, note_id)
+        return _handle_memory_list(handler)
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
@@ -938,6 +1122,27 @@ def handle_post(handler, parsed) -> bool:
     # CSRF: reject cross-origin browser requests
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+
+    if parsed.path == "/api/orch-tasks/spawn":
+        import json as _json
+        from urllib.parse import parse_qs as _parse_qs
+        qs = _parse_qs(parsed.query)
+        body_bytes = handler.body if hasattr(handler, 'body') and handler.body else b"{}"
+        try:
+            data = _json.loads(body_bytes.decode("utf-8"))
+        except Exception:
+            data = {}
+        task_id = qs.get("task_id", [data.get("task_id", "")])[0]
+        domain = qs.get("domain", [data.get("domain", "coding")])[0]
+        if not task_id:
+            return j(handler, {"error": "task_id required"}, status=400)
+        import subprocess as _subprocess
+        scripts_dir = str(_Path.home() / "hermes-orchestrate" / "scripts")
+        _subprocess.run(
+            ["/bin/bash", f"{scripts_dir}/spawn-worker.sh", task_id, domain],
+            capture_output=True, text=True, timeout=10,
+        )
+        return j(handler, {"spawned": task_id, "domain": domain})
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
@@ -1255,6 +1460,15 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/skills/delete":
         return _handle_skill_delete(handler, body)
+
+    # ── Memory Notes API (POST) ──
+    if parsed.path == "/api/memory":
+        return _handle_memory_create(handler, body)
+    if parsed.path.startswith("/api/memory/") and method == "PUT":
+        note_id = parsed.path[len("/api/memory/"):]
+        return _handle_memory_update(handler, body, note_id)
+    if parsed.path == "/api/memory/delete":
+        return _handle_memory_delete(handler, body)
 
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
@@ -1607,6 +1821,49 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
+
+    # ── Orch Heartbeat API (POST) ──
+    if parsed.path == "/api/orch-heartbeat":
+        import json as _json
+        from urllib.parse import parse_qs as _parse_qs
+        from pathlib import Path as _Path
+        qs = _parse_qs(parsed.query)
+        body_bytes = handler.body if hasattr(handler, 'body') and handler.body else b"{}"
+        try:
+            data = _json.loads(body_bytes.decode("utf-8"))
+        except Exception:
+            data = {}
+        action = qs.get("action", [data.get("action", "")])[0]
+        domain = qs.get("domain", [data.get("domain", "")])[0]
+        import subprocess as _subprocess
+        scripts_dir = str(_Path.home() / "hermes-orchestrate" / "scripts")
+        if action == "start":
+            _subprocess.Popen(
+                ["/bin/bash", f"{scripts_dir}/start-heartbeats.sh"],
+                stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, start_new_session=True,
+            )
+        elif action == "stop":
+            _subprocess.Popen(
+                ["/bin/bash", f"{scripts_dir}/stop-heartbeats.sh"],
+                stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL, start_new_session=True,
+            )
+        else:
+            return j(handler, {"error": "action required: start|stop"}, status=400)
+        return j(handler, {"action": action, "domain": domain})
+
+    if parsed.path == "/api/restart":
+        # Gracefully restart the server by shutting down httpd and exec'ing a new process
+        httpd = get_httpd()
+        if httpd:
+            # Schedule shutdown in the server's serve_forever loop
+            def _do_shutdown():
+                # Use os.execv to replace this process with a fresh server.py
+                # sys.argv[0] is server.py path, we reuse the same Python and args
+                os.execv(sys.executable, [sys.executable, str(REPO_ROOT / "server.py")] + sys.argv[1:])
+            # Trigger shutdown on the server thread
+            threading.Thread(target=lambda: (httpd.shutdown(), _do_shutdown()), daemon=True).start()
+            return j(handler, {"restarting": True})
+        return j(handler, {"error": "server not available"}, status=500)
 
     return False  # 404
 
@@ -2319,6 +2576,59 @@ def _handle_memory_read(handler):
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
         },
     )
+
+
+def _handle_memory_list(handler):
+    """GET /api/memory — list all notes."""
+    notes = list_notes()
+    return j(handler, {"notes": notes})
+
+
+def _handle_memory_get(handler, note_id):
+    """GET /api/memory/{id} — get single note."""
+    note = get_note(note_id)
+    if note is None:
+        return bad(handler, "Note not found", 404)
+    return j(handler, note)
+
+
+def _handle_memory_create(handler, body):
+    """POST /api/memory — create a new note."""
+    try:
+        require(body, "title", "content")
+    except ValueError as e:
+        return bad(handler, str(e))
+    title = str(body["title"]).strip()
+    content = str(body.get("content", ""))
+    if not title:
+        return bad(handler, "title is required")
+    note = create_note(title, content)
+    return j(handler, note, status=201)
+
+
+def _handle_memory_update(handler, body, note_id):
+    """PUT /api/memory/{id} — update a note."""
+    try:
+        require(body, "title", "content")
+    except ValueError as e:
+        return bad(handler, str(e))
+    note = update_note(note_id, str(body["title"]).strip(), str(body.get("content", "")))
+    if note is None:
+        return bad(handler, "Note not found", 404)
+    return j(handler, note)
+
+
+def _handle_memory_delete(handler, body):
+    """DELETE /api/memory — delete notes by ids."""
+    try:
+        require(body, "ids")
+    except ValueError as e:
+        return bad(handler, str(e))
+    ids = body["ids"]
+    if not isinstance(ids, list):
+        return bad(handler, "ids must be a list")
+    deleted = delete_notes(ids)
+    return j(handler, {"ok": True, "deleted": deleted})
 
 
 # ── POST route helpers ────────────────────────────────────────────────────────
