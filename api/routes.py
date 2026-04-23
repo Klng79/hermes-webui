@@ -1088,11 +1088,10 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Memory Notes API (GET) ──
     if parsed.path == "/api/memory":
-        # /api/memory/{id} vs /api/memory
-        if parsed.path.startswith("/api/memory/"):
-            note_id = parsed.path[len("/api/memory/"):]
-            return _handle_memory_get(handler, note_id)
         return _handle_memory_list(handler)
+    if parsed.path.startswith("/api/memory/"):
+        note_id = parsed.path[len("/api/memory/"):]
+        return _handle_memory_get(handler, note_id)
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
@@ -1464,9 +1463,6 @@ def handle_post(handler, parsed) -> bool:
     # ── Memory Notes API (POST) ──
     if parsed.path == "/api/memory":
         return _handle_memory_create(handler, body)
-    if parsed.path.startswith("/api/memory/") and method == "PUT":
-        note_id = parsed.path[len("/api/memory/"):]
-        return _handle_memory_update(handler, body, note_id)
     if parsed.path == "/api/memory/delete":
         return _handle_memory_delete(handler, body)
 
@@ -1866,6 +1862,26 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"error": "server not available"}, status=500)
 
     return False  # 404
+
+
+# ── PUT routes ───────────────────────────────────────────────────────────────
+
+
+def handle_put(handler, parsed) -> bool:
+    """Handle all PUT routes. Returns True if handled, False for 404."""
+    # CSRF: reject cross-origin browser requests
+    if not _check_csrf(handler):
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+
+    body = read_body(handler)
+
+    # ── Memory Notes API (PUT) ──
+    if parsed.path.startswith("/api/memory/"):
+        note_id = parsed.path[len("/api/memory/"):]
+        return _handle_memory_update(handler, body, note_id)
+
+    return False  # 404
+
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
 

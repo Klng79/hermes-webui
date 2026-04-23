@@ -19,30 +19,32 @@ def _get_notes_dir():
 def _read_frontmatter(path):
     """Returns (metadata, content) from a frontmatter .md file."""
     try:
-        post = frontmatter.loads(path.read_text(encoding="utf-8", errors="replace"))
-        return post.metadata, post.content
+        result = frontmatter.Frontmatter().read(path.read_text(encoding="utf-8", errors="replace"))
+        return result.get("attributes", {}), result.get("body", "")
     except Exception:
         return {}, ""
 
 def _write_note(path, title, content, existing_id=None):
     """Write a note to disk, returns the id."""
+    import yaml
     note_id = existing_id or str(uuid.uuid4())[:12]
     metadata = {
         "id": note_id,
         "title": title,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    if not existing_id:
-        metadata["created_at"] = metadata["updated_at"]
-    else:
+    # Only try to preserve created_at if the file already exists (update case)
+    if path.exists():
         try:
             old_meta, _ = _read_frontmatter(path)
             if "created_at" in old_meta:
                 metadata["created_at"] = old_meta["created_at"]
         except Exception:
             pass
-    post = frontmatter.Post(content, **metadata)
-    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    else:
+        metadata["created_at"] = metadata["updated_at"]
+    fm_text = "---\n" + yaml.dump(metadata, default_flow_style=False) + "---\n" + content
+    path.write_text(fm_text, encoding="utf-8")
     return note_id
 
 def list_notes():
@@ -89,7 +91,7 @@ def create_note(title, content):
     notes_dir = _get_notes_dir()
     note_id = str(uuid.uuid4())[:12]
     path = notes_dir / f"{note_id}.md"
-    _write_note(path, title, content)
+    _write_note(path, title, content, existing_id=note_id)
     return get_note(note_id)
 
 def update_note(note_id, title, content):
