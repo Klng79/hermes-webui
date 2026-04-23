@@ -95,16 +95,19 @@ def test_skills_search_returns_subset():
 def test_memory_returns_both_files():
     data, status = get("/api/memory")
     assert status == 200
-    assert "memory" in data and "user" in data
+    assert "notes" in data
+    assert isinstance(data["notes"], list)
 
 def test_memory_content_is_string():
     data, _ = get("/api/memory")
-    assert isinstance(data["memory"], str)
-    assert isinstance(data["user"], str)
+    assert isinstance(data.get("notes"), list)
 
 def test_memory_has_mtime():
     data, _ = get("/api/memory")
-    assert "memory_mtime" in data and "user_mtime" in data
+    assert "notes" in data
+    # Each note in the list should have an updated_at
+    for note in data.get("notes", []):
+        assert "updated_at" in note
 
 def test_session_update_requires_session_id():
     result, status = post("/api/session/update", {"model": "openai/gpt-5.4-mini"})
