@@ -1,5 +1,7 @@
 let _currentPanel = 'chat';
 let _skillsData = null; // cached skills list
+let _orchJobsData = null;
+let _orchDashData = null;
 
 async function switchPanel(name) {
   _currentPanel = name;
@@ -16,6 +18,9 @@ async function switchPanel(name) {
   if (name === 'workspaces') await loadWorkspacesPanel();
   if (name === 'profiles') await loadProfilesPanel();
   if (name === 'todos') loadTodos();
+  if (name === 'orchtasks') await loadOrchTasks();
+  if (name === 'orchjobs') await loadOrchJobs();
+  if (name === 'orchdash') await loadOrchDash();
 }
 
 // ── Cron panel ──
@@ -1232,33 +1237,169 @@ async function deleteProfile(name) {
   } catch (e) { showToast(t('delete_failed') + e.message); }
 }
 
-// ── Memory panel ──
+// ── Memory helpers ───────────────────────────────────────────────────────────────
+function relativeTime(isoString) {
+  if (!isoString) return '';
+  try {
+    const diff = Date.now() - new Date(isoString).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h ago';
+    const days = Math.floor(hrs / 24);
+    if (days < 30) return days + 'd ago';
+    return new Date(isoString).toLocaleDateString();
+  } catch(e) { return ''; }
+}
+
+// ── Memory panel ────────────────────────────────────────────────────────────────
+let _selectedNotes = new Set();
+let _editingNoteId = null;  // null = new note, string = existing id
+
 async function loadMemory(force) {
   const panel = $('memoryPanel');
+  _selectedNotes.clear();
+  _editingNoteId = null;
   try {
     const data = await api('/api/memory');
-    _memoryData = data;  // cache for edit form
-    const fmtTime = ts => ts ? new Date(ts*1000).toLocaleString() : '';
-    panel.innerHTML = `
-      <div class="memory-section">
-        <div class="memory-section-title">
-          <span style="display:inline-flex;align-items:center;gap:6px">${li('brain',14)} ${esc(t('my_notes'))}</span>
-          <span class="memory-mtime">${fmtTime(data.memory_mtime)}</span>
+    renderMemoryList(data.notes || []);
+  } catch(e) {
+    panel.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
+}
+
+function renderMemoryList(notes) {
+  const panel = $('memoryPanel');
+  const hasNotes = notes.length > 0;
+  const anySelected = _selectedNotes.size > 0;
+
+  let html = `<div class="memory-toolbar">
+    <button class="btn-ghost" id="memAddBtn" onclick="showNoteForm(null)">${li('plus',14)} ${esc(t('memory_add_note'))}</button>
+    <button class="btn-ghost danger" id="memDelBtn" onclick="deleteSelectedNotes()" ${anySelected ? '' : 'disabled'}>${li('trash',14)} ${esc(t('memory_delete_selected'))}</button>
+  </div>`;
+
+  if (!hasNotes) {
+    html += `<div class="memory-empty">${esc(t('memory_empty'))}</div>`;
+  } else {
+    html += `<div class="memory-list">`;
+    for (const note of notes) {
+      const checked = _selectedNotes.has(note.id) ? 'checked' : '';
+      const isEditing = _editingNoteId === note.id;
+      html += `
+      <div class="memory-note-row ${isEditing ? 'editing' : ''}" data-id="${esc(note.id)}">
+        <div class="memory-note-header" onclick="toggleNoteRow('${esc(note.id)}')">
+          <input type="checkbox" class="mem-check" data-id="${esc(note.id)}" onclick="event.stopPropagation();toggleNoteSelect('${esc(note.id)}')" ${checked}>
+          <span class="mem-title">${esc(note.title || 'Untitled')}</span>
+          <span class="mem-time">${esc(relativeTime(note.updated_at))}</span>
+          <span class="mem-toggle">${isEditing ? li('chevron-up',14) : li('chevron-down',14)}</span>
         </div>
-        ${data.memory
-          ? `<div class="memory-content preview-md">${renderMd(data.memory)}</div>`
-          : `<div class="memory-empty">${esc(t('no_notes_yet'))}</div>`}
-      </div>
-      <div class="memory-section">
-        <div class="memory-section-title">
-          <span style="display:inline-flex;align-items:center;gap:6px">${li('user',14)} ${esc(t('user_profile'))}</span>
-          <span class="memory-mtime">${fmtTime(data.user_mtime)}</span>
-        </div>
-        ${data.user
-          ? `<div class="memory-content preview-md">${renderMd(data.user)}</div>`
-          : `<div class="memory-empty">${esc(t('no_profile_yet'))}</div>`}
+        ${isEditing ? renderNoteForm(note) : `
+        <div class="mem-preview">${esc(note.preview || '')}</div>`}
       </div>`;
-  } catch(e) { panel.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+    }
+    html += `</div>`;
+  }
+  panel.innerHTML = html;
+
+  // Attach checkbox listeners
+  panel.querySelectorAll('.mem-check').forEach(cb => {
+    cb.addEventListener('change', () => toggleNoteSelect(cb.dataset.id));
+  });
+}
+
+function renderNoteForm(note) {
+  const isNew = !note || note === true;
+  const title = (note && note.title) ? esc(note.title) : '';
+  const content = (note && note.content) ? esc(note.content) : '';
+  return `
+  <div class="mem-edit-form ${isNew ? 'mem-new-form' : ''}">
+    <input class="mem-form-title" type="text" id="memFormTitle" placeholder="${esc(t('memory_note_title'))}" value="${title}">
+    <textarea class="mem-form-content" id="memFormContent" placeholder="${esc(t('memory_note_content'))}">${content}</textarea>
+    <div class="mem-form-actions">
+      <button class="btn-primary" onclick="saveNote(${note && note.id ? "'" + esc(note.id) + "'" : 'null'})">${esc(t('save_title'))}</button>
+      <button class="btn-ghost" onclick="cancelNoteEdit()">${esc(t('cancel_title'))}</button>
+    </div>
+  </div>`;
+}
+
+function showNoteForm(noteId) {
+  if (noteId === null) {
+    _editingNoteId = null;
+    const panel = $('memoryPanel');
+    const toolbar = panel.querySelector('.memory-toolbar');
+    const formHtml = `<div class="memory-note-row editing"><div class="mem-edit-form mem-new-form">${renderNoteForm(true)}</div></div>`;
+    toolbar.insertAdjacentHTML('afterend', formHtml);
+    $('memFormTitle')?.focus();
+  } else {
+    _editingNoteId = noteId;
+    loadMemory();
+  }
+}
+
+async function saveNote(noteId) {
+  const title = $('memFormTitle')?.value.trim();
+  const content = $('memFormContent')?.value || '';
+  if (!title) { showToast(t('error_prefix') + 'Title required'); return; }
+  try {
+    if (noteId) {
+      await api(`/api/memory/${noteId}`, { method: 'PUT', body: JSON.stringify({ title, content }) });
+      showToast(t('memory_updated'));
+    } else {
+      await api('/api/memory', { method: 'POST', body: JSON.stringify({ title, content }) });
+      showToast(t('memory_created'));
+    }
+    _editingNoteId = null;
+    loadMemory();
+  } catch(e) { showToast(t('save_failed') + e.message); }
+}
+
+function cancelNoteEdit() {
+  _editingNoteId = null;
+  loadMemory();
+}
+
+function toggleNoteRow(noteId) {
+  if (_editingNoteId === noteId) {
+    _editingNoteId = null;
+  } else {
+    _editingNoteId = noteId;
+    loadMemory();
+  }
+}
+
+function toggleNoteSelect(noteId) {
+  if (_selectedNotes.has(noteId)) {
+    _selectedNotes.delete(noteId);
+  } else {
+    _selectedNotes.add(noteId);
+  }
+  updateDeleteButton();
+}
+
+function updateDeleteButton() {
+  const btn = $('memDelBtn');
+  if (!btn) return;
+  btn.disabled = _selectedNotes.size === 0;
+}
+
+async function deleteSelectedNotes() {
+  const n = _selectedNotes.size;
+  if (n === 0) return;
+  const confirmed = await showConfirmDialog({
+    title: t('memory_delete_selected'),
+    message: t('memory_delete_confirm', n),
+    confirmLabel: t('delete_title'),
+    danger: true,
+    focusCancel: true
+  });
+  if (!confirmed) return;
+  try {
+    await api('/api/memory/delete', { method: 'POST', body: JSON.stringify({ ids: [..._selectedNotes] }) });
+    showToast(t('memory_deleted'));
+    _selectedNotes.clear();
+    loadMemory();
+  } catch(e) { showToast(t('delete_failed') + e.message); }
 }
 
 // Drag and drop
@@ -1775,6 +1916,18 @@ async function disableAuth(){
   }
 }
 
+async function restartServer(){
+  const _doRestart=await showConfirmDialog({title:t('restart_server_confirm_title'),message:t('restart_server_confirm_message'),confirmLabel:t('restart_server'),danger:true,focusCancel:true});
+  if(!_doRestart) return;
+  try{
+    await api('/api/restart',{method:'POST',body:'{}'});
+    // Server is restarting - show a message before the connection drops
+    showToast(t('restarting_server') || 'Server restarting…', 5000);
+  }catch(e){
+    showToast(t('restart_server_failed')+e.message);
+  }
+}
+
 // Close settings on overlay click (not panel click) -- with unsaved-changes check
 document.addEventListener('click',e=>{
   const overlay=$('settingsOverlay');
@@ -1881,6 +2034,222 @@ function dismissErrorBanner(){
   _backgroundErrors.length=0;
   const banner=$('bgErrorBanner');
   if(banner) banner.style.display='none';
+}
+
+// ─── Orchestration Jobs (Heartbeat) Panel ────────────────────────────────────
+
+async function loadOrchJobs() {
+  const box = $('orchjobsList');
+  if (!box) return;
+  try {
+    const base = window.location.origin;
+    const data = await api(base + '/api/orch-jobs');
+    _orchJobsData = data.jobs || [];
+    renderOrchJobs(_orchJobsData, box);
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent)">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderOrchJobs(jobs, box) {
+  box.innerHTML = '';
+  for (const job of jobs) {
+    const statusColor = job.running ? '#0c0' : '#888';
+    const item = document.createElement('div');
+    item.className = 'orchjob-item';
+    item.innerHTML = `
+      <div class="orchjob-header">
+        <span class="orchjob-domain" style="font-weight:600">${esc(job.domain)}</span>
+        <span class="orchjob-status" style="color:${statusColor};font-size:11px;font-weight:600">${esc(job.status)}</span>
+      </div>
+      <div class="orchjob-footer">
+        <span style="color:var(--muted);font-size:11px">${esc(job.sessionName)}</span>
+        ${job.running
+          ? `<button class="orchjob-btn orchjob-stop" onclick="stopHeartbeat('${esc(job.domain)}')">Stop</button>`
+          : `<button class="orchjob-btn orchjob-start" onclick="startHeartbeat('${esc(job.domain)}')">Start</button>`
+        }
+      </div>
+    `;
+    box.appendChild(item);
+  }
+}
+
+async function startHeartbeat(domain) {
+  try {
+    const base = window.location.origin;
+    await fetch(base + '/api/orch-heartbeat?action=start', { method: 'POST' });
+    setTimeout(() => loadOrchJobs(), 1000);
+  } catch(e) { alert('Start failed: ' + e.message); }
+}
+
+async function stopHeartbeat(domain) {
+  try {
+    const base = window.location.origin;
+    await fetch(base + '/api/orch-heartbeat?action=stop', { method: 'POST' });
+    setTimeout(() => loadOrchJobs(), 1000);
+  } catch(e) { alert('Stop failed: ' + e.message); }
+}
+
+async function startAllHeartbeats() {
+  await startHeartbeat('all');
+}
+
+async function stopAllHeartbeats() {
+  await stopHeartbeat('all');
+}
+
+// ─── Orchestration Dashboard Panel ───────────────────────────────────────────
+
+async function loadOrchDash() {
+  const box = $('orchdashContent');
+  if (!box) return;
+  try {
+    const base = window.location.origin;
+    const data = await api(base + '/api/orch-dash');
+    const tasks = data.tasks || { total: 0, pending: 0, running: 0, done: 0, failed: 0, blocked: 0 };
+    const activeWorkers = data.activeWorkers || 0;
+    const totalCost = data.totalCost || 0;
+    _orchDashData = { tasks, activeWorkers, totalCost };
+    renderOrchDash({ tasks, activeWorkers, totalCost, uptime: 'Active' }, box);
+    loadPendingApprovals();
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent)">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderOrchDash(data, box) {
+  const { tasks, activeWorkers, uptime, totalCost } = data;
+  box.innerHTML = `
+    <div class="orchdash-grid">
+      <div class="orchdash-card">
+        <div class="orchdash-card-label">Active Workers</div>
+        <div class="orchdash-card-value">${activeWorkers}</div>
+      </div>
+      <div class="orchdash-card">
+        <div class="orchdash-card-label">Total Tasks</div>
+        <div class="orchdash-card-value">${tasks.total}</div>
+      </div>
+      <div class="orchdash-card">
+        <div class="orchdash-card-label">Running</div>
+        <div class="orchdash-card-value" style="color:#0af">${tasks.running}</div>
+      </div>
+      <div class="orchdash-card">
+        <div class="orchdash-card-label">Pending</div>
+        <div class="orchdash-card-value" style="color:#888">${tasks.pending}</div>
+      </div>
+      <div class="orchdash-card">
+        <div class="orchdash-card-label">Done</div>
+        <div class="orchdash-card-value" style="color:#0c0">${tasks.done}</div>
+      </div>
+      <div class="orchdash-card">
+        <div class="orchdash-card-label">Failed</div>
+        <div class="orchdash-card-value" style="color:#f44">${tasks.failed}</div>
+      </div>
+      <div class="orchdash-card orchdash-card-wide">
+        <div class="orchdash-card-label">Session Cost</div>
+        <div class="orchdash-card-value">$${totalCost.toFixed(4)}</div>
+      </div>
+      <div class="orchdash-card orchdash-card-wide">
+        <div class="orchdash-card-label">Status</div>
+        <div class="orchdash-card-value" style="color:#0c0">${uptime}</div>
+      </div>
+    </div>
+    <div class="orchdash-approval-section" id="orchdashApprovals"></div>
+  `;
+  loadPendingApprovals();
+}
+
+async function loadPendingApprovals() {
+  const box = $('orchdashApprovals');
+  if (!box) return;
+  try {
+    const base = window.location.origin;
+    const data = await api(base + '/api/orch-approvals');
+    const approvals = data.approvals || [];
+    if (!approvals.length) {
+      box.innerHTML = '';
+      return;
+    }
+    let html = '<div class="orchdash-approvals-title">Pending Approvals</div>';
+    for (const entry of approvals) {
+      html += `
+        <div class="orchdash-approval-item">
+          <div>
+            <div style="font-weight:600;font-size:13px">${esc(entry.operation || 'Unknown')}</div>
+            <div style="color:var(--muted);font-size:11px">${esc(entry.reason || '')} — Task ${esc(entry.task_id || '')}</div>
+          </div>
+          <button class="orchdash-approve-btn" onclick="approveTaskOp('${esc(entry.filename)}')">Approve</button>
+        </div>
+      `;
+    }
+    box.innerHTML = html;
+  } catch(e) { /* silent */ }
+}
+
+async function approveTaskOp(filename) {
+  try {
+    const base = window.location.origin;
+    const resp = await fetch(base + '/api/orch-approve?filename=' + encodeURIComponent(filename), {
+      method: 'POST',
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    setTimeout(() => loadOrchDash(), 1000);
+  } catch(e) { alert('Approve failed: ' + e.message); }
+}
+
+// ─── Orchestration Tasks Panel ─────────────────────────────────────────────────
+
+async function loadOrchTasks() {
+  const box = $('orchtasksList');
+  if (!box) return;
+  try {
+    const base = window.location.origin;
+    const data = await api(base + '/api/orch-tasks');
+    const tasks = data.tasks || [];
+    _orchTasksData = tasks;
+    renderOrchTasks(tasks, box);
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent)">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderOrchTasks(tasks, box) {
+  if (!tasks.length) {
+    box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('no_orchtasks'))}</div>`;
+    return;
+  }
+  box.innerHTML = '';
+  const statusColors = { pending: '#888', running: '#0af', done: '#0c0', failed: '#f44', blocked: '#fa0' };
+  for (const task of tasks) {
+    const item = document.createElement('div');
+    item.className = 'orchtask-item';
+    const statusColor = statusColors[task.status] || '#888';
+    const taskId = task.task_id || task.id || '';
+    item.innerHTML = `
+      <div class="orchtask-header">
+        <span class="orchtask-id">${esc(taskId)}</span>
+        <span class="orchtask-status" style="color:${statusColor}">${esc(task.status || 'unknown')}</span>
+      </div>
+      <div class="orchtask-title">${esc(task.title || 'Untitled')}</div>
+      <div class="orchtask-meta">
+        <span class="orchtask-domain">${esc(task.domain || '')}</span>
+        ${task.worker_id ? `<span class="orchtask-worker">@ ${esc(task.worker_id)}</span>` : ''}
+        ${task.status === 'pending' ? `<button class="orchtask-spawn-btn" onclick="spawnOrchTask('${esc(taskId)}','${esc(task.domain || 'coding')}')">Spawn</button>` : ''}
+      </div>
+    `;
+    box.appendChild(item);
+  }
+}
+
+async function spawnOrchTask(taskId, domain) {
+  try {
+    const base = window.location.origin;
+    const resp = await fetch(base + '/api/orch-tasks/spawn?task_id=' + encodeURIComponent(taskId) + '&domain=' + encodeURIComponent(domain), {
+      method: 'POST',
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    await loadOrchTasks();
+  } catch(e) { alert('Spawn failed: ' + e.message); }
 }
 
 // Event wiring
