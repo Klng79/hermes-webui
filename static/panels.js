@@ -1256,6 +1256,7 @@ function relativeTime(isoString) {
 // ── Memory panel ────────────────────────────────────────────────────────────────
 let _selectedNotes = new Set();
 let _editingNoteId = null;  // null = new note, string = existing id
+let _noteContentCache = {}; // noteId -> {title, content} for editing
 
 async function loadMemory(force) {
   const panel = $('memoryPanel');
@@ -1311,8 +1312,11 @@ function renderMemoryList(notes) {
 
 function renderNoteForm(note) {
   const isNew = !note || note === true;
-  const title = (note && note.title) ? esc(note.title) : '';
-  const content = (note && note.content) ? esc(note.content) : '';
+  const noteId = note && note.id;
+  // Use cached full content when available (list only returns preview)
+  const cached = noteId ? _noteContentCache[noteId] : null;
+  const title = cached ? esc(cached.title) : (note && note.title ? esc(note.title) : '');
+  const content = cached ? esc(cached.content) : (note && note.content ? esc(note.content) : '');
   return `
   <div class="mem-edit-form ${isNew ? 'mem-new-form' : ''}">
     <input class="mem-form-title" type="text" id="memFormTitle" placeholder="${esc(t('memory_note_title'))}" value="${title}">
@@ -1346,6 +1350,7 @@ async function saveNote(noteId) {
     if (noteId) {
       await api(`/api/memory/${noteId}`, { method: 'PUT', body: JSON.stringify({ title, content }) });
       showToast(t('memory_updated'));
+      delete _noteContentCache[noteId];
     } else {
       await api('/api/memory', { method: 'POST', body: JSON.stringify({ title, content }) });
       showToast(t('memory_created'));
@@ -1356,15 +1361,25 @@ async function saveNote(noteId) {
 }
 
 function cancelNoteEdit() {
+  const editingId = _editingNoteId;
   _editingNoteId = null;
+  if (editingId) delete _noteContentCache[editingId];
   loadMemory();
 }
 
-function toggleNoteRow(noteId) {
+async function toggleNoteRow(noteId) {
   if (_editingNoteId === noteId) {
     _editingNoteId = null;
   } else {
     _editingNoteId = noteId;
+    // Fetch full note content for the form (list only returns preview)
+    try {
+      const data = await api(`/api/memory/${noteId}`);
+      if (data && data.id) {
+        _noteContentCache[noteId] = { title: data.title, content: data.content };
+      }
+    } catch(e) {}
+    // Re-render AFTER cache is populated to ensure form gets content
     loadMemory();
   }
 }
@@ -1433,6 +1448,9 @@ function switchSettingsSection(name){
     }
     if(pane) pane.classList.toggle('active',active);
   });
+  // Sync mobile dropdown
+  const dd=$('settingsSectionDropdown');
+  if(dd && dd.value!==section) dd.value=section;
   // Lazy-load providers when the tab is opened
   if(section==='providers') loadProvidersPanel();
 }
@@ -1573,7 +1591,7 @@ async function loadSettingsPanel(){
       setLocale(resolvedLanguage);
       if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
     }
-    // Populate model dropdown from /api/models
+    // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
       modelSel.innerHTML='';
@@ -1583,6 +1601,7 @@ async function loadSettingsPanel(){
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
+          if(g.provider_id) og.dataset.provider=g.provider_id;
           for(const m of g.models){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
@@ -1590,9 +1609,23 @@ async function loadSettingsPanel(){
           }
           modelSel.appendChild(og);
         }
+        // Append live-fetched models for the active provider, same as the
+        // chat-header dropdown does via _fetchLiveModels() (#872).
+        if(models.active_provider && typeof _fetchLiveModels==='function'){
+          _fetchLiveModels(models.active_provider, modelSel);
+        }
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
-      modelSel.value=_settingsHermesDefaultModelOnOpen;
+      // Use the smart matcher so a saved bare form like "anthropic/claude-opus-4.6"
+      // (what the CLI's `hermes model` command writes) still selects the matching
+      // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this, the
+      // picker renders blank for any user whose default was persisted without the
+      // @-prefix — CLI-first users, legacy installs, etc.
+      if(typeof _applyModelToDropdown==='function'){
+        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel);
+      }else{
+        modelSel.value=_settingsHermesDefaultModelOnOpen;
+      }
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Send key preference
@@ -1717,24 +1750,25 @@ function _buildProviderCard(p){
   }else{
     const actions=document.createElement('div');
     actions.className='provider-card-actions';
-    actions.style.cssText='margin-top:6px;display:flex;gap:6px;align-items:center';
     const input=document.createElement('input');
     input.type='password';
     input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
-    input.style.cssText='flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
+    input.style.cssText='flex:1;min-width:0;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
     input.autocomplete='off';
     const saveBtn=document.createElement('button');
     saveBtn.className='sm-btn provider-save-btn';
-    saveBtn.style.cssText='padding:5px 12px;font-size:12px;white-space:nowrap';
-    saveBtn.textContent=t('providers_save');
+    saveBtn.setAttribute('aria-label',t('providers_save'));
+    saveBtn.title=t('providers_save');
+    saveBtn.innerHTML='<svg class="provider-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span class="provider-btn-label">'+t('providers_save')+'</span>';
     saveBtn.onclick=()=>_saveProviderKey(p.id);
     actions.appendChild(input);
     actions.appendChild(saveBtn);
     if(p.has_key){
       const removeBtn=document.createElement('button');
-      removeBtn.className='sm-btn';
-      removeBtn.style.cssText='padding:5px 10px;font-size:12px;color:var(--error);border-color:rgba(233,69,96,.25);white-space:nowrap';
-      removeBtn.textContent=t('providers_remove');
+      removeBtn.className='sm-btn provider-remove-btn';
+      removeBtn.setAttribute('aria-label',t('providers_remove'));
+      removeBtn.title=t('providers_remove');
+      removeBtn.innerHTML='<svg class="provider-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="provider-btn-label">'+t('providers_remove')+'</span>';
       removeBtn.onclick=()=>_removeProviderKey(p.id);
       actions.appendChild(removeBtn);
     }
@@ -1824,6 +1858,8 @@ function _applySavedSettingsUi(saved, body, opts){
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
+  // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
+  if(body.default_model) window._defaultModel=body.default_model;
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();

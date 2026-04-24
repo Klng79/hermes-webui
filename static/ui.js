@@ -84,6 +84,9 @@ async function populateModelDropdown(){
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
+    // Store default model so newSession() can apply it (#872).
+    // Per-page-load — not synced across browser tabs.
+    window._defaultModel=data.default_model||null;
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -118,72 +121,74 @@ async function populateModelDropdown(){
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
 
+function _addLiveModelsToSelect(provider, models, sel){
+  if(!provider||!models||!models.length||!sel) return 0;
+  const currentVal=sel.value;
+  let providerGroup=null;
+  for(const og of sel.querySelectorAll('optgroup')){
+    if(og.dataset.provider&&og.dataset.provider===provider){
+      providerGroup=og; break;
+    }
+    if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
+      providerGroup=og; break;
+    }
+  }
+  if(!providerGroup){
+    providerGroup=document.createElement('optgroup');
+    providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    sel.appendChild(providerGroup);
+  }
+  const existingIds=new Set([...sel.options].map(o=>o.value));
+  // Normalized dedup: strip @provider: prefix and unify separators so
+  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
+  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
+  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
+  const _normId=id=>{
+    let s=String(id||'');
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
+    s=s.split('/').pop();                                                    // strip namespace prefix
+    return s.replace(/-/g,'.').toLowerCase();
+  };
+  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
+  let added=0;
+  const _ap=(window._activeProvider||'').toLowerCase();
+  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
+  for(const m of models){
+    let mid=m.id;
+    if(_isPortalFetch && !mid.startsWith('@')){
+      mid=`@${provider}:${mid}`;
+    }
+    if(existingIds.has(mid)) continue;
+    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
+    const opt=document.createElement('option');
+    opt.value=mid;
+    opt.textContent=m.label||m.id;
+    opt.title='Live model — fetched from provider';
+    providerGroup.appendChild(opt);
+    _dynamicModelLabels[mid]=m.label||m.id;
+    added++;
+  }
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel);
+  return added;
+}
+
 async function _fetchLiveModels(provider, sel){
   if(!provider||!sel) return;
-  // Don't fetch for providers where we know it's unsupported or unnecessary
-  // All providers now supported via agent's provider_model_ids() — no exclusions needed
-  if(_liveModelCache[provider]) return; // already fetched this session
+  // Already fetched — apply cached models to this select element (#872)
+  if(_liveModelCache[provider]){
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    if(added>0 && typeof syncModelChip==='function') syncModelChip();
+    return;
+  }
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
     const data=await fetch(url.href,{credentials:'include'}).then(r=>r.json());
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
-    // Remember current selection before rebuilding options
-    const currentVal=sel.value;
-    // Rebuild the optgroup for this provider with live models
-    // Keep other providers' optgroups intact
-    let providerGroup=null;
-    for(const og of sel.querySelectorAll('optgroup')){
-      // Prefer exact data-provider match (set from provider_id in API response)
-      // over substring label match — avoids false positives like 'zai' not matching
-      // 'Z.AI / GLM' and vice versa.
-      if(og.dataset.provider&&og.dataset.provider===provider){
-        providerGroup=og; break;
-      }
-      if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
-        providerGroup=og; break;
-      }
-    }
-    if(!providerGroup){
-      // No existing group — add a new one
-      providerGroup=document.createElement('optgroup');
-      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
-      sel.appendChild(providerGroup);
-    }
-    // Rebuild options from live data
-    const existingIds=new Set([...sel.options].map(o=>o.value));
-    let added=0;
-    // Apply @provider: prefix to live-fetched model IDs (mirrors the server-side
-    // behaviour for static lists).  Portal providers like Nous return upstream
-    // vendor IDs (e.g. "minimax/minimax-m2.7", "anthropic/claude-opus-4.7") —
-    // without a `@nous:` prefix, `resolve_model_provider()` sees the slash and
-    // mis-routes via OpenRouter → 404.  Prefixing with `@${provider}:` makes
-    // the portal hint explicit so routing honours it (#854).
-    //
-    // Scope: only apply the prefix when this fetch is for the active provider
-    // and that provider is a portal (not OpenRouter / custom, which use bare
-    // or cross-namespace IDs natively).  Skip IDs that already carry an
-    // `@prefix:` — they've already been disambiguated upstream.
-    const _ap=(window._activeProvider||'').toLowerCase();
-    const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
-    for(const m of data.models){
-      let mid=m.id;
-      if(_isPortalFetch && !mid.startsWith('@')){
-        mid=`@${provider}:${mid}`;
-      }
-      if(existingIds.has(mid)) continue; // already shown from static list
-      const opt=document.createElement('option');
-      opt.value=mid;
-      opt.textContent=m.label||m.id;
-      opt.title='Live model — fetched from provider';
-      providerGroup.appendChild(opt);
-      _dynamicModelLabels[mid]=m.label||m.id;
-      added++;
-    }
+    const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
-      // Restore selection
-      if(currentVal) _applyModelToDropdown(currentVal, sel);
       if(typeof syncModelChip==='function') syncModelChip();
       console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
@@ -381,6 +386,7 @@ function toggleModelDropdown(){
   if(open){closeModelDropdown(); return;}
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
+  if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -400,6 +406,97 @@ document.addEventListener('click',e=>{
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+  // Keep the reasoning dropdown aligned under its chip when the window
+  // resizes while open — same pattern as the model dropdown above.
+  const rdd=$('composerReasoningDropdown');
+  if(rdd&&rdd.classList.contains('open')&&typeof _positionReasoningDropdown==='function'){
+    _positionReasoningDropdown();
+  }
+});
+
+// ── Reasoning effort chip ────────────────────────────────────────────────────
+let _currentReasoningEffort=null;
+
+function _applyReasoningChip(eff){
+  _currentReasoningEffort=eff;
+  const wrap=$('composerReasoningWrap');
+  const label=$('composerReasoningLabel');
+  if(!wrap||!label) return;
+  if(!eff||eff==='none'){wrap.style.display='none';return;}
+  wrap.style.display='';
+  label.textContent=eff;
+  _highlightReasoningOption(eff);
+}
+
+function fetchReasoningChip(){
+  api('/api/reasoning').then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'');
+  }).catch(function(){_applyReasoningChip('');});
+}
+
+function syncReasoningChip(){
+  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
+  _applyReasoningChip(_currentReasoningEffort);
+}
+
+function _highlightReasoningOption(effort){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    opt.classList.toggle('selected',opt.dataset.effort===effort);
+  });
+}
+
+function toggleReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(!dd||!chip) return;
+  const open=dd.classList.contains('open');
+  if(open){closeReasoningDropdown();return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  _highlightReasoningOption(_currentReasoningEffort);
+  dd.classList.add('open');
+  _positionReasoningDropdown();
+  chip.classList.add('active');
+}
+
+function _positionReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer) return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0,footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0,Math.min(left,maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function closeReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#composerReasoningChip')&&!e.target.closest('#composerReasoningDropdown')) closeReasoningDropdown();
+  if(e.target.closest('.reasoning-option')){
+    const opt=e.target.closest('.reasoning-option');
+    const effort=opt&&opt.dataset.effort;
+    if(effort){
+      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+        .then(function(st){
+          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+        })
+        .catch(function(){showToast('🧠 Failed to set effort');});
+      closeReasoningDropdown();
+    }
+  }
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -630,7 +727,7 @@ function renderMd(raw){
   // Stash <code> tags from the backtick pass above so the outer bold/italic
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
-  s=s.replace(/(<code>[^<]*<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
@@ -650,12 +747,19 @@ function renderMd(raw){
     }
     return html+'</ul>';
   });
+  // Ordered lists: use value= on each <li> so the correct number is preserved
+  // even when blank lines between items cause the paragraph splitter to place
+  // each item in its own <ol> container — without value= every <ol> restarts
+  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
   s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
     let html='<ol>';
     for(const l of lines){
+      const numMatch=l.match(/^\s*(\d+)\. /);
+      const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
-      html+=`<li>${inlineMd(text)}</li>`;
+      const valAttr=num!==null?` value="${num}"`:'';
+      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
     }
     return html+'</ol>';
   });
@@ -1318,6 +1422,7 @@ function syncTopbar(){
     }
   }
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
@@ -1681,6 +1786,7 @@ function renderMessages(){
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo-2',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
@@ -2018,16 +2124,33 @@ function appendLiveToolCard(tc){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
+      // Keep #toolRunningRow alive — dots stay until text starts streaming
+      // or the next tool fires (which replaces them). Removing here caused
+      // a gap between tool completion and the first text token arriving.
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert BEFORE the live assistant segment if it exists, so tool cards stay
-  // between the current thinking block(s) and the streaming response.
-  const liveAssistant=inner.querySelector('[data-live-assistant="1"]');
-  if(liveAssistant) inner.insertBefore(row, liveAssistant);
+  // Insert after whichever comes last: the current live assistant segment or
+  // the last tool card. This handles both cases:
+  //   text → tool1 → tool2  (no text between tools: anchor is card1)
+  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+  const children=Array.from(inner.children);
+  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+  // card, not between the text segment and thinking.
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', row);
   else inner.appendChild(row);
+  // Add a 3-dot waiting indicator below the tool card so there's visual
+  // feedback while the tool is running. Removed when text starts streaming
+  // (ensureAssistantRow) or when tool_complete fires.
+  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+  const waitRow=document.createElement('div');
+  waitRow.id='toolRunningRow';
+  waitRow.className='assistant-segment';
+  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  row.insertAdjacentElement('afterend', waitRow);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
@@ -2265,6 +2388,13 @@ function _thinkingMarkup(text=''){
 function finalizeThinkingCard(){
   const row=$('thinkingRow');
   if(!row) return;
+  // If the row is still just a spinner (no thinking content rendered),
+  // remove it entirely — it's the initial waiting dots.
+  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+    row.remove();
+    return;
+  }
   row.removeAttribute('id');
   row.removeAttribute('data-thinking-active');
 }
@@ -2283,7 +2413,17 @@ function appendThinking(text=''){
     row.className='assistant-segment';
     row.id='thinkingRow';
     row.setAttribute('data-thinking-active','1');
-    blocks.appendChild(row);
+    // Insert after whichever comes last: a live assistant segment or a tool card.
+    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+    // in the right position in the interleaved sequence.
+    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+    const allChildren=Array.from(blocks.children);
+    const anchor=allChildren.filter(el=>
+      el.id!=='toolRunningRow' &&
+      el.matches('[data-live-assistant="1"],.tool-card-row')
+    ).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else blocks.appendChild(row);
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
